@@ -694,11 +694,11 @@ export class ChatwootService {
 
       // If lock already exists, wait until release or timeout
       if (await this.cache.has(lockKey)) {
-        this.logger.verbose(`Operação de criação já em andamento para ${remoteJid}, aguardando resultado...`);
+        this.logger.verbose(i18next.t('log.creationInProgress', { remoteJid }));
         const start = Date.now();
         while (await this.cache.has(lockKey)) {
           if (Date.now() - start > maxWaitTime) {
-            this.logger.warn(`Timeout aguardando lock para ${remoteJid}`);
+            this.logger.warn(i18next.t('log.lockTimeout', { remoteJid }));
             break;
           }
           await new Promise((res) => setTimeout(res, this.LOCK_POLLING_DELAY_MS));
@@ -1546,7 +1546,7 @@ export class ChatwootService {
           const lastMessage = await this.prismaRepository.message.findFirst({
             where: {
               key: {
-                path: ['fromMe'],
+                path: '$.fromMe',
                 equals: false,
               },
               instanceId: instance.instanceId,
@@ -1576,7 +1576,7 @@ export class ChatwootService {
               where: {
                 instanceId: instance.instanceId,
                 key: {
-                  path: ['id'],
+                  path: '$.id',
                   equals: key.id,
                 },
               },
@@ -2025,7 +2025,7 @@ export class ChatwootService {
           quotedMsg = await this.prismaRepository.message.findFirst({
             where: {
               key: {
-                path: ['id'],
+                path: '$.id',
                 equals: quotedId,
               },
               chatwootMessageId: {
@@ -2337,7 +2337,7 @@ export class ChatwootService {
             await this.prismaRepository.message.deleteMany({
               where: {
                 key: {
-                  path: ['id'],
+                  path: '$.id',
                   equals: body.key.id,
                 },
                 instanceId: instance.instanceId,
@@ -2679,7 +2679,7 @@ export class ChatwootService {
         where: {
           Instance: { name: instance.instanceName },
           messageTimestamp: { gte: Number(dayjs().subtract(6, 'hours').unix()) },
-          AND: ids.map((id) => ({ key: { path: ['id'], not: id } })),
+          AND: ids.map((id) => ({ key: { path: '$.id', not: id } })),
         },
       });
 

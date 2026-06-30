@@ -82,6 +82,8 @@ import { createId as cuid } from '@paralleldrive/cuid2';
 import { Instance, Message } from '@prisma/client';
 import { createJid } from '@utils/createJid';
 import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
+import { runHumanTimedSend, shouldApplyHumanTiming } from '@utils/humanResponseTiming';
+import i18next from '@utils/i18n';
 import { makeProxyAgent, makeProxyAgentUndici } from '@utils/makeProxyAgent';
 import { getOnWhatsappCache, saveOnWhatsappCache } from '@utils/onWhatsappCache';
 import { status } from '@utils/renderStatus';
@@ -251,6 +253,9 @@ export class BaileysStartupService extends ChannelStartupService {
   private endSession = false;
   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
   private eventProcessingQueue: Promise<void> = Promise.resolve();
+
+  /** JIDs en memoria para audiencia de estados (status@broadcast), aunque no se persistan contactos. */
+  private readonly statusAudienceJids = new Set<string>();
 
   // Cache TTL constants (in seconds)
   private readonly MESSAGE_CACHE_TTL_SECONDS = 5 * 60; // 5 minutes - avoid duplicate message processing
@@ -466,6 +471,8 @@ export class BaileysStartupService extends ChannelStartupService {
 
     if (connection === 'open') {
       this.instance.wuid = this.client.user.id.replace(/:\d+/, '');
+      this.trackStatusAudienceJid(this.instance.wuid);
+      void this.seedStatusAudienceFromDatabase();
       try {
         const profilePic = await this.profilePicture(this.instance.wuid);
         this.instance.profilePictureUrl = profilePic.profilePictureUrl;
@@ -518,6 +525,35 @@ export class BaileysStartupService extends ChannelStartupService {
     if (connection === 'connecting') {
       this.sendDataWebhook(Events.CONNECTION_UPDATE, { instance: this.instance.name, ...this.stateConnection });
     }
+  }
+
+  /** Si Baileys ya cerró el socket, avisa al webhook para que el backend marque desvinculado. */
+  private notificarConexionPerdidaSiAplica(error: unknown): void {
+    const msg = String((error as Error)?.message ?? error ?? '').toLowerCase();
+    if (!msg.includes('connection closed')) return;
+
+    this.stateConnection = {
+      state: 'close',
+      statusReason: 428,
+    };
+
+    void this.prismaRepository.instance
+      .update({
+        where: { id: this.instanceId },
+        data: {
+          connectionStatus: 'close',
+          disconnectionAt: new Date(),
+          disconnectionReasonCode: 428,
+        },
+      })
+      .catch((err) => this.logger.warn('No se pudo persistir cierre de conexión: ' + String(err)));
+
+    this.sendDataWebhook(Events.CONNECTION_UPDATE, {
+      instance: this.instance.name,
+      state: 'close',
+      status: 'close',
+      statusReason: 428,
+    });
   }
 
   private async getMessage(key: proto.IMessageKey, full = false) {
@@ -675,19 +711,14 @@ export class BaileysStartupService extends ChannelStartupService {
       userDevicesCache: this.userDevicesCache,
       transactionOpts: { maxCommitRetries: 10, delayBetweenTriesMs: 3000 },
       patchMessageBeforeSending(message) {
-        if (
-          message.deviceSentMessage?.message?.listMessage?.listType === proto.Message.ListMessage.ListType.PRODUCT_LIST
-        ) {
-          message = JSON.parse(JSON.stringify(message));
+        const corregirListType = (listMessage?: proto.Message.IListMessage | null) => {
+          if (listMessage?.listType === proto.Message.ListMessage.ListType.PRODUCT_LIST) {
+            listMessage.listType = proto.Message.ListMessage.ListType.SINGLE_SELECT;
+          }
+        };
 
-          message.deviceSentMessage.message.listMessage.listType = proto.Message.ListMessage.ListType.SINGLE_SELECT;
-        }
-
-        if (message.listMessage?.listType == proto.Message.ListMessage.ListType.PRODUCT_LIST) {
-          message = JSON.parse(JSON.stringify(message));
-
-          message.listMessage.listType = proto.Message.ListMessage.ListType.SINGLE_SELECT;
-        }
+        corregirListType(message.listMessage);
+        corregirListType(message.deviceSentMessage?.message?.listMessage);
 
         return message;
       },
@@ -750,6 +781,10 @@ export class BaileysStartupService extends ChannelStartupService {
 
   private readonly chatHandle = {
     'chats.upsert': async (chats: Chat[]) => {
+      for (const chat of chats) {
+        this.trackStatusAudienceJid(chat.id);
+      }
+
       const existingChatIds = await this.prismaRepository.chat.findMany({
         where: { instanceId: this.instanceId },
         select: { remoteJid: true },
@@ -816,6 +851,10 @@ export class BaileysStartupService extends ChannelStartupService {
         }));
 
         if (contactsRaw.length > 0) {
+          for (const contact of contactsRaw) {
+            this.trackStatusAudienceJid(contact.remoteJid);
+          }
+
           this.sendDataWebhook(Events.CONTACTS_UPSERT, contactsRaw);
 
           if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
@@ -1085,6 +1124,8 @@ export class BaileysStartupService extends ChannelStartupService {
     ) => {
       try {
         for (const received of messages) {
+          this.trackStatusAudienceJid(received.key?.remoteJid);
+
           if (
             received?.messageStubParameters?.some?.((param) =>
               [
@@ -1163,7 +1204,8 @@ export class BaileysStartupService extends ChannelStartupService {
             }
           }
 
-          if ((type !== 'notify' && type !== 'append') || editedMessage || !received?.message) {
+          // Solo mensajes en vivo (notify). 'append' = historial al reconectar; no deben disparar webhooks ni bot.
+          if (type !== 'notify' || editedMessage || !received?.message) {
             continue;
           }
 
@@ -1934,11 +1976,13 @@ export class BaileysStartupService extends ChannelStartupService {
                 }
               }
 
-              await Promise.all(
-                Object.keys(remotesJidMap).map(async (remoteJid) =>
-                  this.updateMessagesReadedByTimestamp(remoteJid, remotesJidMap[remoteJid]),
-                ),
-              );
+              if (database.SAVE_DATA.NEW_MESSAGE) {
+                await Promise.all(
+                  Object.keys(remotesJidMap).map(async (remoteJid) =>
+                    this.updateMessagesReadedByTimestamp(remoteJid, remotesJidMap[remoteJid]),
+                  ),
+                );
+              }
             }
 
             if (events['presence.update']) {
@@ -2222,13 +2266,12 @@ export class BaileysStartupService extends ChannelStartupService {
     if (sender === 'status@broadcast') {
       let jidList;
       if (message['status'].option.allContacts) {
-        const contacts = await this.prismaRepository.contact.findMany({
-          where: { instanceId: this.instanceId, remoteJid: { not: { endsWith: '@g.us' } } },
-        });
-
-        jidList = contacts.map((contact) => contact.remoteJid);
+        jidList = await this.resolveStatusAudienceJids(true);
       } else {
-        jidList = message['status'].option.statusJidList;
+        jidList =
+          message['status'].option.statusJidList?.length > 0
+            ? message['status'].option.statusJidList
+            : await this.resolveStatusAudienceJids(true);
       }
 
       const batchSize = 10;
@@ -2244,6 +2287,9 @@ export class BaileysStartupService extends ChannelStartupService {
       const firstBatch = batches.shift();
 
       if (firstBatch) {
+        this.logger.verbose(
+          `[status] Enviando ${message['status'].option?.statusJidList?.length ?? jidList.length} jid(s) a status@broadcast`,
+        );
         firstMessage = await this.client.sendMessage(
           sender,
           message['status'].content as unknown as AnyMessageContent,
@@ -2251,6 +2297,7 @@ export class BaileysStartupService extends ChannelStartupService {
             backgroundColor: message['status'].option.backgroundColor,
             font: message['status'].option.font,
             statusJidList: firstBatch,
+            broadcast: true,
           } as unknown as MiscMessageGenerationOptions,
         );
 
@@ -2269,6 +2316,7 @@ export class BaileysStartupService extends ChannelStartupService {
               font: message['status'].option.font,
               statusJidList: batch,
               messageId: msgId,
+              broadcast: true,
             } as unknown as MiscMessageGenerationOptions,
           );
 
@@ -2284,6 +2332,35 @@ export class BaileysStartupService extends ChannelStartupService {
       message as unknown as AnyMessageContent,
       option as unknown as MiscMessageGenerationOptions,
     );
+  }
+
+  private async applyComposingDelay(sender: string, delayMs: number, presence?: WAPresence): Promise<void> {
+    if (!delayMs || delayMs <= 0) return;
+
+    this.logger.verbose(`Human typing for ${delayMs}ms to ${sender}`);
+
+    if (delayMs > 20000) {
+      let remainingDelay = delayMs;
+      while (remainingDelay > 20000) {
+        await this.client.presenceSubscribe(sender);
+        await this.client.sendPresenceUpdate(presence ?? 'composing', sender);
+        await delay(20000);
+        await this.client.sendPresenceUpdate('paused', sender);
+        remainingDelay -= 20000;
+      }
+      if (remainingDelay > 0) {
+        await this.client.presenceSubscribe(sender);
+        await this.client.sendPresenceUpdate(presence ?? 'composing', sender);
+        await delay(remainingDelay);
+        await this.client.sendPresenceUpdate('paused', sender);
+      }
+      return;
+    }
+
+    await this.client.presenceSubscribe(sender);
+    await this.client.sendPresenceUpdate(presence ?? 'composing', sender);
+    await delay(delayMs);
+    await this.client.sendPresenceUpdate('paused', sender);
   }
 
   private async sendMessageWithTyping<T = proto.IMessage>(
@@ -2302,40 +2379,25 @@ export class BaileysStartupService extends ChannelStartupService {
 
     this.logger.verbose(`Sending message to ${sender}`);
 
+    if (shouldApplyHumanTiming(options)) {
+      return runHumanTimedSend(
+        this.instance.name,
+        sender,
+        message,
+        {
+          setAvailable: async () => {
+            await this.client.sendPresenceUpdate('available');
+          },
+          applyComposing: (jid, ms) => this.applyComposingDelay(jid, ms, options?.presence),
+        },
+        () => this.sendMessageWithTyping(number, message, { ...options, skipHumanTiming: true }, isIntegration),
+      );
+    }
+
     try {
       if (options?.delay) {
         this.logger.verbose(`Typing for ${options.delay}ms to ${sender}`);
-        if (options.delay > 20000) {
-          let remainingDelay = options.delay;
-          while (remainingDelay > 20000) {
-            await this.client.presenceSubscribe(sender);
-
-            await this.client.sendPresenceUpdate((options.presence as WAPresence) ?? 'composing', sender);
-
-            await delay(20000);
-
-            await this.client.sendPresenceUpdate('paused', sender);
-
-            remainingDelay -= 20000;
-          }
-          if (remainingDelay > 0) {
-            await this.client.presenceSubscribe(sender);
-
-            await this.client.sendPresenceUpdate((options.presence as WAPresence) ?? 'composing', sender);
-
-            await delay(remainingDelay);
-
-            await this.client.sendPresenceUpdate('paused', sender);
-          }
-        } else {
-          await this.client.presenceSubscribe(sender);
-
-          await this.client.sendPresenceUpdate((options.presence as WAPresence) ?? 'composing', sender);
-
-          await delay(options.delay);
-
-          await this.client.sendPresenceUpdate('paused', sender);
-        }
+        await this.applyComposingDelay(sender, options.delay, options?.presence);
       }
 
       const linkPreview = options?.linkPreview != false ? undefined : false;
@@ -2609,6 +2671,7 @@ export class BaileysStartupService extends ChannelStartupService {
       return { presence: data.presence };
     } catch (error) {
       this.logger.error(error);
+      this.notificarConexionPerdidaSiAplica(error);
       throw new BadRequestException(error.toString());
     }
   }
@@ -2621,6 +2684,7 @@ export class BaileysStartupService extends ChannelStartupService {
       return { presence: data.presence };
     } catch (error) {
       this.logger.error(error);
+      this.notificarConexionPerdidaSiAplica(error);
       throw new BadRequestException(error.toString());
     }
   }
@@ -2663,6 +2727,152 @@ export class BaileysStartupService extends ChannelStartupService {
     );
   }
 
+  private trackStatusAudienceJid(jid?: string | null): void {
+    if (!jid || jid === 'status@broadcast' || jid.endsWith('@g.us') || jid.endsWith('@broadcast')) {
+      return;
+    }
+
+    try {
+      const normalized = createJid(jid);
+      if (normalized.endsWith('@s.whatsapp.net') || normalized.endsWith('@lid')) {
+        this.statusAudienceJids.add(normalized);
+      }
+    } catch {
+      /* ignore invalid jid */
+    }
+  }
+
+  private async loadAudienceJidsFromDatabase(): Promise<string[]> {
+    const jids = new Set<string>();
+
+    try {
+      const chats = await this.prismaRepository.chat.findMany({
+        where: {
+          instanceId: this.instanceId,
+          remoteJid: { endsWith: '@s.whatsapp.net' },
+        },
+        select: { remoteJid: true },
+        take: 500,
+      });
+      for (const chat of chats) {
+        this.trackStatusAudienceJid(chat.remoteJid);
+        jids.add(createJid(chat.remoteJid));
+      }
+    } catch (error) {
+      this.logger.debug(`Chats no disponibles para audiencia de estados: ${String(error)}`);
+    }
+
+    try {
+      const messages = await this.prismaRepository.message.findMany({
+        where: { instanceId: this.instanceId },
+        select: { key: true },
+        take: 500,
+        orderBy: { messageTimestamp: 'desc' },
+      });
+      for (const row of messages) {
+        const remoteJid = (row.key as { remoteJid?: string } | null)?.remoteJid;
+        if (!remoteJid) continue;
+        this.trackStatusAudienceJid(remoteJid);
+        jids.add(createJid(remoteJid));
+      }
+    } catch (error) {
+      this.logger.debug(`Mensajes no disponibles para audiencia de estados: ${String(error)}`);
+    }
+
+    return [...jids].filter((jid) => jid.endsWith('@s.whatsapp.net'));
+  }
+
+  private async seedStatusAudienceFromDatabase(): Promise<void> {
+    try {
+      const contacts = await this.prismaRepository.contact.findMany({
+        where: {
+          instanceId: this.instanceId,
+          NOT: [{ remoteJid: { endsWith: '@g.us' } }, { remoteJid: 'status@broadcast' }],
+        },
+        select: { remoteJid: true },
+      });
+
+      for (const contact of contacts) {
+        this.trackStatusAudienceJid(contact.remoteJid);
+      }
+
+      await this.loadAudienceJidsFromDatabase();
+    } catch (error) {
+      this.logger.debug(`No se pudieron precargar contactos para estados: ${String(error)}`);
+    }
+  }
+
+  /**
+   * Audiencia del estado (status@broadcast). WhatsApp exige statusJidList; no es un mensaje 1:1.
+   * Si DATABASE_SAVE_DATA_CONTACTS=false, usa contactos en memoria o el propio wuid.
+   */
+  private async resolveStatusAudienceJids(allContacts: boolean, explicitList?: string[]): Promise<string[]> {
+    const normalize = (jid?: string | null): string | null => {
+      if (!jid || jid === 'status@broadcast' || jid.endsWith('@g.us') || jid.endsWith('@broadcast')) {
+        return null;
+      }
+      try {
+        return createJid(jid);
+      } catch {
+        return null;
+      }
+    };
+
+    const mergeWithSelf = (list: string[]): string[] => {
+      const wuid = normalize(this.instance.wuid ?? this.client?.user?.id);
+      const unique = new Set(list.filter(Boolean));
+      if (wuid?.endsWith('@s.whatsapp.net')) {
+        unique.add(wuid);
+      }
+      return [...unique];
+    };
+
+    if (explicitList?.length) {
+      const list = mergeWithSelf([...new Set(explicitList.map((jid) => normalize(jid)).filter(Boolean) as string[])]);
+      if (list.length) {
+        return list;
+      }
+    }
+
+    if (!allContacts) {
+      return [];
+    }
+
+    const dbContacts = await this.prismaRepository.contact.findMany({
+      where: {
+        instanceId: this.instanceId,
+        NOT: [{ remoteJid: { endsWith: '@g.us' } }, { remoteJid: 'status@broadcast' }],
+      },
+      select: { remoteJid: true },
+    });
+
+    const fromDb = mergeWithSelf(dbContacts.map((contact) => normalize(contact.remoteJid)).filter(Boolean) as string[]);
+    if (fromDb.length > 1) {
+      return fromDb;
+    }
+
+    const fromHistory = mergeWithSelf(await this.loadAudienceJidsFromDatabase());
+    if (fromHistory.length > 1) {
+      return fromHistory;
+    }
+
+    if (this.statusAudienceJids.size) {
+      return mergeWithSelf([...this.statusAudienceJids]);
+    }
+
+    const wuidOnly = mergeWithSelf([]);
+    if (wuidOnly.length) {
+      this.logger.warn(
+        `[status] Audiencia reducida (${wuidOnly.length} jid). Activa DATABASE_SAVE_DATA_CONTACTS=true y reconecta WhatsApp para que el estado sea visible a tus contactos.`,
+      );
+      return wuidOnly;
+    }
+
+    throw new BadRequestException(
+      'Contacts not found for status. Open WhatsApp on the linked phone or enable DATABASE_SAVE_DATA_CONTACTS.',
+    );
+  }
+
   private async formatStatusMessage(status: StatusMessage) {
     if (!status.type) {
       throw new BadRequestException('Type is required');
@@ -2673,16 +2883,16 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     if (status.allContacts) {
-      const contacts = await this.prismaRepository.contact.findMany({ where: { instanceId: this.instanceId } });
-
-      if (!contacts.length) {
-        throw new BadRequestException('Contacts not found');
-      }
-
-      status.statusJidList = contacts.filter((contact) => contact.pushName).map((contact) => contact.remoteJid);
+      status.statusJidList = await this.resolveStatusAudienceJids(true);
+    } else if (status.statusJidList?.length) {
+      status.statusJidList = await this.resolveStatusAudienceJids(false, status.statusJidList);
     }
 
-    if (!status.statusJidList?.length && !status.allContacts) {
+    if (!status.statusJidList?.length) {
+      status.statusJidList = await this.resolveStatusAudienceJids(true);
+    }
+
+    if (!status.statusJidList?.length) {
       throw new BadRequestException('StatusJidList is required');
     }
 
@@ -2737,6 +2947,10 @@ export class BaileysStartupService extends ChannelStartupService {
     if (file) mediaData.content = file.buffer.toString('base64');
 
     const status = await this.formatStatusMessage(mediaData);
+
+    this.logger.log(
+      `[status] Publicando ${mediaData.type} en status@broadcast (audiencia: ${status.option.statusJidList?.length ?? 0} contacto(s))`,
+    );
 
     const statusSent = await this.sendMessageWithTyping('status@broadcast', { status });
 
@@ -3443,7 +3657,7 @@ export class BaileysStartupService extends ChannelStartupService {
           buttonText: data?.buttonText,
           footerText: data?.footerText,
           sections: data.sections,
-          listType: 2,
+          listType: proto.Message.ListMessage.ListType.SINGLE_SELECT,
         },
       },
       {
@@ -3661,7 +3875,7 @@ export class BaileysStartupService extends ChannelStartupService {
     });
 
     if (numbersToCache.length > 0) {
-      this.logger.verbose(`Salvando ${numbersToCache.length} números no cache`);
+      this.logger.verbose(i18next.t('log.savingNumbersToCache', { count: numbersToCache.length }));
       await saveOnWhatsappCache(
         numbersToCache.map((user) => ({
           remoteJid: user.jid,
@@ -3776,7 +3990,7 @@ export class BaileysStartupService extends ChannelStartupService {
         if (messageId) {
           const isLogicalDeleted = configService.get<Database>('DATABASE').DELETE_DATA.LOGICAL_MESSAGE_DELETE;
           let message = await this.prismaRepository.message.findFirst({
-            where: { key: { path: ['id'], equals: messageId } },
+            where: { key: { path: '$.id', equals: messageId } },
           });
           if (isLogicalDeleted) {
             if (!message) return response;
@@ -4196,7 +4410,7 @@ export class BaileysStartupService extends ChannelStartupService {
           const messageId = messageSent.message?.protocolMessage?.key?.id;
           if (messageId && this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
             let message = await this.prismaRepository.message.findFirst({
-              where: { key: { path: ['id'], equals: messageId } },
+              where: { key: { path: '$.id', equals: messageId } },
             });
             if (!message) throw new NotFoundException('Message not found');
 
@@ -4731,19 +4945,42 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
+  private isDatabaseMysql(): boolean {
+    return this.configService.get<Database>('DATABASE').PROVIDER === 'mysql';
+  }
+
   private async updateMessagesReadedByTimestamp(remoteJid: string, timestamp?: number): Promise<number> {
     if (timestamp === undefined || timestamp === null) return 0;
+    if (!this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) return 0;
 
-    // Use raw SQL to avoid JSON path issues
-    const result = await this.prismaRepository.$executeRaw`
-      UPDATE "Message"
-      SET "status" = ${status[4]}
-      WHERE "instanceId" = ${this.instanceId}
-      AND "key"->>'remoteJid' = ${remoteJid}
-      AND ("key"->>'fromMe')::boolean = false
-      AND "messageTimestamp" <= ${timestamp}
-      AND ("status" IS NULL OR "status" = ${status[3]})
-    `;
+    let result: number;
+
+    if (this.isDatabaseMysql()) {
+      result = await this.prismaRepository.$executeRawUnsafe(
+        `UPDATE Message
+         SET status = ?
+         WHERE instanceId = ?
+         AND JSON_UNQUOTE(JSON_EXTRACT(\`key\`, '$.remoteJid')) = ?
+         AND JSON_EXTRACT(\`key\`, '$.fromMe') = CAST('false' AS JSON)
+         AND messageTimestamp <= ?
+         AND (status IS NULL OR status = ?)`,
+        status[4],
+        this.instanceId,
+        remoteJid,
+        timestamp,
+        status[3],
+      );
+    } else {
+      result = await this.prismaRepository.$executeRaw`
+        UPDATE "Message"
+        SET "status" = ${status[4]}
+        WHERE "instanceId" = ${this.instanceId}
+        AND "key"->>'remoteJid' = ${remoteJid}
+        AND ("key"->>'fromMe')::boolean = false
+        AND "messageTimestamp" <= ${timestamp}
+        AND ("status" IS NULL OR "status" = ${status[3]})
+      `;
+    }
 
     if (result) {
       if (result > 0) {
@@ -4757,17 +4994,33 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   private async updateChatUnreadMessages(remoteJid: string): Promise<number> {
-    const [chat, unreadMessages] = await Promise.all([
-      this.prismaRepository.chat.findFirst({ where: { remoteJid } }),
-      // Use raw SQL to avoid JSON path issues
-      this.prismaRepository.$queryRaw`
+    if (!this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) return 0;
+
+    let unreadMessages: number;
+
+    if (this.isDatabaseMysql()) {
+      const rows = (await this.prismaRepository.$queryRawUnsafe(
+        `SELECT COUNT(*) as count FROM Message
+         WHERE instanceId = ?
+         AND JSON_UNQUOTE(JSON_EXTRACT(\`key\`, '$.remoteJid')) = ?
+         AND JSON_EXTRACT(\`key\`, '$.fromMe') = CAST('false' AS JSON)
+         AND status = ?`,
+        this.instanceId,
+        remoteJid,
+        status[3],
+      )) as { count: bigint | number }[];
+      unreadMessages = Number(rows[0]?.count ?? 0);
+    } else {
+      unreadMessages = await this.prismaRepository.$queryRaw`
         SELECT COUNT(*)::int as count FROM "Message"
         WHERE "instanceId" = ${this.instanceId}
         AND "key"->>'remoteJid' = ${remoteJid}
         AND ("key"->>'fromMe')::boolean = false
         AND "status" = ${status[3]}
-      `.then((result: any[]) => result[0]?.count || 0),
-    ]);
+      `.then((result: { count: number }[]) => result[0]?.count || 0);
+    }
+
+    const chat = await this.prismaRepository.chat.findFirst({ where: { remoteJid } });
 
     if (chat && chat.unreadMessages !== unreadMessages) {
       await this.prismaRepository.chat.update({ where: { id: chat.id }, data: { unreadMessages } });
@@ -5034,13 +5287,13 @@ export class BaileysStartupService extends ChannelStartupService {
         messageType: query?.where?.messageType,
         ...timestampFilter,
         AND: [
-          keyFilters?.id ? { key: { path: ['id'], equals: keyFilters?.id } } : {},
-          keyFilters?.fromMe ? { key: { path: ['fromMe'], equals: keyFilters?.fromMe } } : {},
-          keyFilters?.participant ? { key: { path: ['participant'], equals: keyFilters?.participant } } : {},
+          keyFilters?.id ? { key: { path: '$.id', equals: keyFilters?.id } } : {},
+          keyFilters?.fromMe ? { key: { path: '$.fromMe', equals: keyFilters?.fromMe } } : {},
+          keyFilters?.participant ? { key: { path: '$.participant', equals: keyFilters?.participant } } : {},
           {
             OR: [
-              keyFilters?.remoteJid ? { key: { path: ['remoteJid'], equals: keyFilters?.remoteJid } } : {},
-              keyFilters?.remoteJidAlt ? { key: { path: ['remoteJidAlt'], equals: keyFilters?.remoteJidAlt } } : {},
+              keyFilters?.remoteJid ? { key: { path: '$.remoteJid', equals: keyFilters?.remoteJid } } : {},
+              keyFilters?.remoteJidAlt ? { key: { path: '$.remoteJidAlt', equals: keyFilters?.remoteJidAlt } } : {},
             ],
           },
         ],
@@ -5063,13 +5316,13 @@ export class BaileysStartupService extends ChannelStartupService {
         messageType: query?.where?.messageType,
         ...timestampFilter,
         AND: [
-          keyFilters?.id ? { key: { path: ['id'], equals: keyFilters?.id } } : {},
-          keyFilters?.fromMe ? { key: { path: ['fromMe'], equals: keyFilters?.fromMe } } : {},
-          keyFilters?.participant ? { key: { path: ['participant'], equals: keyFilters?.participant } } : {},
+          keyFilters?.id ? { key: { path: '$.id', equals: keyFilters?.id } } : {},
+          keyFilters?.fromMe ? { key: { path: '$.fromMe', equals: keyFilters?.fromMe } } : {},
+          keyFilters?.participant ? { key: { path: '$.participant', equals: keyFilters?.participant } } : {},
           {
             OR: [
-              keyFilters?.remoteJid ? { key: { path: ['remoteJid'], equals: keyFilters?.remoteJid } } : {},
-              keyFilters?.remoteJidAlt ? { key: { path: ['remoteJidAlt'], equals: keyFilters?.remoteJidAlt } } : {},
+              keyFilters?.remoteJid ? { key: { path: '$.remoteJid', equals: keyFilters?.remoteJid } } : {},
+              keyFilters?.remoteJidAlt ? { key: { path: '$.remoteJidAlt', equals: keyFilters?.remoteJidAlt } } : {},
             ],
           },
         ],

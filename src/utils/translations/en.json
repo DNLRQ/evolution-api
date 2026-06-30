@@ -23,5 +23,18 @@
   "cw.contactMessage.number": "Number",
   "cw.message.notsent": "🚨 The message could not be sent. Please check your connection. {{error}}",
   "cw.message.numbernotinwhatsapp": "🚨 The message was not sent as the contact is not a valid Whatsapp number.",
-  "cw.message.edited": "Edited Message"
+  "cw.message.edited": "Edited Message",
+  "webhook.allAttemptsFailed": "All attempts failed: {{error}}",
+  "webhook.successAfterAttempts": "Successfully sent after {{attempts}} attempts",
+  "webhook.nonRetryableError": "Non-recoverable error ({{status}}): {{error}}. Cancelling retries.",
+  "webhook.attemptFailed": "Attempt {{current}}/{{max}} failed: {{reason}}",
+  "webhook.requestTimeout": "Request timeout",
+  "webhook.waitingBeforeRetry": "Waiting {{seconds}} seconds before next attempt",
+  "webhook.jwtGenerationFailed": "JWT generation failed: {{error}}",
+  "log.savingNumbersToCache": "Saving {{count}} numbers to cache",
+  "log.creationInProgress": "Creation operation already in progress for {{remoteJid}}, waiting for result...",
+  "log.lockTimeout": "Timeout waiting for lock on {{remoteJid}}",
+  "log.sqs.queueCreated": "Queue {{queueName}} created: {{queueUrl}}",
+  "log.sqs.queueCreateError": "Error creating queue {{queueName}}: {{error}}",
+  "log.sqs.queueListError": "Error listing queues for {{prefixName}}: {{error}}"
 }

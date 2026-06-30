@@ -389,6 +389,21 @@ export type EventEmitter = {
   MAX_LISTENERS: number;
 };
 
+/** Tiempos realistas de presencia/escritura al enviar mensajes (LookControl-style). */
+export type HumanResponseTiming = {
+  ENABLED: boolean;
+  ONLINE_DELAY_MIN_MS: number;
+  ONLINE_DELAY_MAX_MS: number;
+  PRE_COMPOSE_DELAY_MIN_MS: number;
+  PRE_COMPOSE_DELAY_MAX_MS: number;
+  CAMBIO_CHAT_DELAY_MS: number;
+  CLIENT_TYPING_WAIT_MS: number;
+  ONLINE_KEEPALIVE_MS: number;
+  TYPING_MS_PER_CHAR: number;
+  TYPING_MIN_MS: number;
+  TYPING_MAX_MS: number;
+};
+
 export type Production = boolean;
 
 export interface Env {
@@ -428,6 +443,7 @@ export interface Env {
   FACEBOOK: Facebook;
   SENTRY: Sentry;
   EVENT_EMITTER: EventEmitter;
+  HUMAN_RESPONSE_TIMING: HumanResponseTiming;
   PRODUCTION?: Production;
 }
 
@@ -902,6 +918,19 @@ export class ConfigService {
       },
       EVENT_EMITTER: {
         MAX_LISTENERS: Number.parseInt(process.env?.EVENT_EMITTER_MAX_LISTENERS) || 50,
+      },
+      HUMAN_RESPONSE_TIMING: {
+        ENABLED: process.env?.HUMAN_RESPONSE_TIMING === 'true',
+        ONLINE_DELAY_MIN_MS: Number.parseInt(process.env?.HUMAN_RESPONSE_ONLINE_DELAY_MIN_MS) || 1000,
+        ONLINE_DELAY_MAX_MS: Number.parseInt(process.env?.HUMAN_RESPONSE_ONLINE_DELAY_MAX_MS) || 2000,
+        PRE_COMPOSE_DELAY_MIN_MS: Number.parseInt(process.env?.HUMAN_RESPONSE_PRE_COMPOSE_DELAY_MIN_MS) || 2000,
+        PRE_COMPOSE_DELAY_MAX_MS: Number.parseInt(process.env?.HUMAN_RESPONSE_PRE_COMPOSE_DELAY_MAX_MS) || 4000,
+        CAMBIO_CHAT_DELAY_MS: Number.parseInt(process.env?.HUMAN_RESPONSE_CAMBIO_CHAT_DELAY_MS) || 2000,
+        CLIENT_TYPING_WAIT_MS: Number.parseInt(process.env?.HUMAN_RESPONSE_CLIENT_TYPING_WAIT_MS) || 15000,
+        ONLINE_KEEPALIVE_MS: Number.parseInt(process.env?.HUMAN_RESPONSE_ONLINE_KEEPALIVE_MS) || 5000,
+        TYPING_MS_PER_CHAR: Number.parseInt(process.env?.HUMAN_RESPONSE_TYPING_MS_PER_CHAR) || 35,
+        TYPING_MIN_MS: Number.parseInt(process.env?.HUMAN_RESPONSE_TYPING_MIN_MS) || 400,
+        TYPING_MAX_MS: Number.parseInt(process.env?.HUMAN_RESPONSE_TYPING_MAX_MS) || 12000,
       },
     };
   }

@@ -23,5 +23,18 @@
   "cw.contactMessage.number": "Numero",
   "cw.message.notsent": "🚨 El mensaje no se pudo enviar. Comprueba tu conexión. {{error}}",
   "cw.message.numbernotinwhatsapp": "🚨 El mensaje no fue enviado porque el contacto no es un número de Whatsapp válido.",
-  "cw.message.edited": "Mensaje editado"
+  "cw.message.edited": "Mensaje editado",
+  "webhook.allAttemptsFailed": "Todos los intentos fallaron: {{error}}",
+  "webhook.successAfterAttempts": "Envío exitoso después de {{attempts}} intentos",
+  "webhook.nonRetryableError": "Error no recuperable ({{status}}): {{error}}. Cancelando reintentos.",
+  "webhook.attemptFailed": "Intento {{current}}/{{max}} fallido: {{reason}}",
+  "webhook.requestTimeout": "Tiempo de espera de la solicitud agotado",
+  "webhook.waitingBeforeRetry": "Esperando {{seconds}} segundos antes del próximo intento",
+  "webhook.jwtGenerationFailed": "Error al generar JWT: {{error}}",
+  "log.savingNumbersToCache": "Guardando {{count}} números en caché",
+  "log.creationInProgress": "Operación de creación ya en curso para {{remoteJid}}, esperando resultado...",
+  "log.lockTimeout": "Tiempo de espera agotado esperando el bloqueo para {{remoteJid}}",
+  "log.sqs.queueCreated": "Cola {{queueName}} creada: {{queueUrl}}",
+  "log.sqs.queueCreateError": "Error al crear la cola {{queueName}}: {{error}}",
+  "log.sqs.queueListError": "Error al listar colas para {{prefixName}}: {{error}}"
 }

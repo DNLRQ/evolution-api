@@ -4,6 +4,7 @@ import { WAMonitoringService } from '@api/services/monitor.service';
 import { CreateQueueCommand, DeleteQueueCommand, ListQueuesCommand, SQS } from '@aws-sdk/client-sqs';
 import { configService, HttpServer, Log, S3, Sqs } from '@config/env.config';
 import { Logger } from '@config/logger.config';
+import i18next from '@utils/i18n';
 
 import { EmitData, EventController, EventControllerInterface } from '../event.controller';
 import { EventDto } from '../event.dto';
@@ -231,9 +232,9 @@ export class SqsController extends EventController implements EventControllerInt
           });
 
           const data = await this.sqs.send(createCommand);
-          this.logger.info(`Queue ${queueName} criada: ${data.QueueUrl}`);
+          this.logger.info(i18next.t('log.sqs.queueCreated', { queueName, queueUrl: data.QueueUrl }));
         } catch (err: any) {
-          this.logger.error(`Erro ao criar queue ${queueName}: ${err.message}`);
+          this.logger.error(i18next.t('log.sqs.queueCreateError', { queueName, error: err.message }));
         }
 
         if (sqsConfig.GLOBAL_ENABLED && sqsConfig.GLOBAL_FORCE_SINGLE_QUEUE) {
@@ -260,7 +261,7 @@ export class SqsController extends EventController implements EventControllerInt
         });
       }
     } catch (error: any) {
-      this.logger.error(`Erro ao listar filas para ${prefixName}: ${error.message}`);
+      this.logger.error(i18next.t('log.sqs.queueListError', { prefixName, error: error.message }));
       return;
     }
 

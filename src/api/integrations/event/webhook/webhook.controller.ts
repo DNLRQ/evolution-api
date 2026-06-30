@@ -5,6 +5,7 @@ import { wa } from '@api/types/wa.types';
 import { configService, Log, Webhook } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 // import { BadRequestException } from '@exceptions';
+import i18next from '@utils/i18n';
 import axios, { AxiosInstance } from 'axios';
 import * as jwt from 'jsonwebtoken';
 
@@ -135,7 +136,7 @@ export class WebhookController extends EventController implements EventControlle
         } catch (error) {
           this.logger.error({
             local: `${origin}.sendData-Webhook`,
-            message: `Todas as tentativas falharam: ${error?.message}`,
+            message: i18next.t('webhook.allAttemptsFailed', { error: error?.message }),
             hostName: error?.hostname,
             syscall: error?.syscall,
             code: error?.code,
@@ -185,7 +186,7 @@ export class WebhookController extends EventController implements EventControlle
         } catch (error) {
           this.logger.error({
             local: `${origin}.sendData-Webhook-Global`,
-            message: `Todas as tentativas falharam: ${error?.message}`,
+            message: i18next.t('webhook.allAttemptsFailed', { error: error?.message }),
             hostName: error?.hostname,
             syscall: error?.syscall,
             code: error?.code,
@@ -225,7 +226,7 @@ export class WebhookController extends EventController implements EventControlle
         if (attempts > 0) {
           this.logger.log({
             local: `${origin}`,
-            message: `Sucesso no envio após ${attempts + 1} tentativas`,
+            message: i18next.t('webhook.successAfterAttempts', { attempts: attempts + 1 }),
             url: baseURL,
           });
         }
@@ -238,7 +239,10 @@ export class WebhookController extends EventController implements EventControlle
         if (error?.response?.status && nonRetryableStatusCodes.includes(error.response.status)) {
           this.logger.error({
             local: `${origin}`,
-            message: `Erro não recuperável (${error.response.status}): ${error?.message}. Cancelando retentativas.`,
+            message: i18next.t('webhook.nonRetryableError', {
+              status: error.response.status,
+              error: error?.message,
+            }),
             statusCode: error?.response?.status,
             url: baseURL,
             server_url: serverUrl,
@@ -248,7 +252,11 @@ export class WebhookController extends EventController implements EventControlle
 
         this.logger.error({
           local: `${origin}`,
-          message: `Tentativa ${attempts}/${maxRetryAttempts} falhou: ${isTimeout ? 'Timeout da requisição' : error?.message}`,
+          message: i18next.t('webhook.attemptFailed', {
+            current: attempts,
+            max: maxRetryAttempts,
+            reason: isTimeout ? i18next.t('webhook.requestTimeout') : error?.message,
+          }),
           hostName: error?.hostname,
           syscall: error?.syscall,
           code: error?.code,
@@ -275,7 +283,7 @@ export class WebhookController extends EventController implements EventControlle
 
         this.logger.log({
           local: `${origin}`,
-          message: `Aguardando ${nextDelay.toFixed(1)} segundos antes da próxima tentativa`,
+          message: i18next.t('webhook.waitingBeforeRetry', { seconds: nextDelay.toFixed(1) }),
           url: baseURL,
         });
 
@@ -298,7 +306,7 @@ export class WebhookController extends EventController implements EventControlle
     } catch (error) {
       this.logger.error({
         local: 'WebhookController.generateJwtToken',
-        message: `JWT generation failed: ${error?.message}`,
+        message: i18next.t('webhook.jwtGenerationFailed', { error: error?.message }),
       });
       throw error;
     }

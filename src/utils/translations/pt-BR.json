@@ -23,5 +23,18 @@
   "cw.contactMessage.number": "Número",
   "cw.message.notsent": "🚨 Não foi possível enviar a mensagem. Verifique sua conexão. {{error}}",
   "cw.message.numbernotinwhatsapp": "🚨 A mensagem não foi enviada, pois o contato não é um número válido do WhatsApp.",
-  "cw.message.edited": "Mensagem editada"
+  "cw.message.edited": "Mensagem editada",
+  "webhook.allAttemptsFailed": "Todas as tentativas falharam: {{error}}",
+  "webhook.successAfterAttempts": "Sucesso no envio após {{attempts}} tentativas",
+  "webhook.nonRetryableError": "Erro não recuperável ({{status}}): {{error}}. Cancelando retentativas.",
+  "webhook.attemptFailed": "Tentativa {{current}}/{{max}} falhou: {{reason}}",
+  "webhook.requestTimeout": "Timeout da requisição",
+  "webhook.waitingBeforeRetry": "Aguardando {{seconds}} segundos antes da próxima tentativa",
+  "webhook.jwtGenerationFailed": "Falha na geração do JWT: {{error}}",
+  "log.savingNumbersToCache": "Salvando {{count}} números no cache",
+  "log.creationInProgress": "Operação de criação já em andamento para {{remoteJid}}, aguardando resultado...",
+  "log.lockTimeout": "Timeout aguardando lock para {{remoteJid}}",
+  "log.sqs.queueCreated": "Queue {{queueName}} criada: {{queueUrl}}",
+  "log.sqs.queueCreateError": "Erro ao criar queue {{queueName}}: {{error}}",
+  "log.sqs.queueListError": "Erro ao listar filas para {{prefixName}}: {{error}}"
 }

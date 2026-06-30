@@ -7,6 +7,8 @@ export class Quoted {
 
 export class Options {
   delay?: number;
+  /** Si true, no aplica HUMAN_RESPONSE_TIMING aunque esté habilitado en .env */
+  skipHumanTiming?: boolean;
   presence?: WAPresence;
   quoted?: Quoted;
   linkPreview?: boolean;
